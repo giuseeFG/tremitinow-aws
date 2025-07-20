@@ -199,6 +199,8 @@ Resources:
             RestApiId: !Ref TremitiNowAdminAPI
             Path: /admin/queue/status
             Method: get
+            Auth:
+              Authorizer: AdminAuthorizer
 
   MonitorDLQFunction:
     Type: AWS::Serverless::Function
@@ -220,6 +222,8 @@ Resources:
             RestApiId: !Ref TremitiNowAdminAPI
             Path: /admin/dlq/status
             Method: get
+            Auth:
+              Authorizer: AdminAuthorizer
 
   ReprocessDLQFunction:
     Type: AWS::Serverless::Function

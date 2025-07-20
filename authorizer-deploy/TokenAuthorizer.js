@@ -98,8 +98,6 @@ function generatePolicy(principalId, effect, resource, context = {}) {
         }
       ]
     },
-    // Disabilita cache completamente
-    ttlOverride: 0,
     context: {
       ...context,
       originalPrincipalId: principalId,
