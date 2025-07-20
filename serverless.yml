@@ -1,0 +1,353 @@
+service: tremitinow-aws
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: eu-central-1
+  stage: ${opt:stage, 'dev'}
+  timeout: 30
+  memorySize: 128
+  environment:
+    STAGE: ${self:provider.stage}
+
+plugins:
+  - serverless-webpack
+
+custom:
+  webpack:
+    webpackConfig: 'webpack.config.js'
+    includeModules: true
+
+functions:
+  # Lambda per gestione ticket
+  submitTickets:
+    handler: src/handlers/submitTickets.handler
+    description: "Chiamata da POST /tickets -> inserisce i ticket nella coda principale"
+    timeout: 10
+    environment:
+      MAIN_QUEUE_URL: !Ref TicketsQueue
+      SUPPLIER_TOKEN_1_NLG: ${env:SUPPLIER_TOKEN_1_NLG}
+      SUPPLIER_TOKEN_2_ALIDAUNIA: ${env:SUPPLIER_TOKEN_2_ALIDAUNIA}
+      SUPPLIER_TOKEN_3_NAVITREMITI: ${env:SUPPLIER_TOKEN_3_NAVITREMITI}
+      SUPPLIER_TOKEN_4_GSTRAVEL: ${env:SUPPLIER_TOKEN_4_GSTRAVEL}
+      SUPPLIER_TOKEN_5_UTENTE_PRIVATO: ${env:SUPPLIER_TOKEN_5_UTENTE_PRIVATO}
+    role: LambdaExecutionRole
+    events:
+      - http:
+          path: tickets
+          method: post
+          authorizer:
+            name: LambdaAuthorizer
+            type: request
+            identitySource: method.request.header.Authorization
+
+  processTickets_s3:
+    handler: src/handlers/processTickets_s3.handler
+    description: "Chiamata quando viene triggerata la coda \"tickets-queue\" -> inserisce i ticket in s3, Dynamo e Postgres"
+    timeout: 3
+    environment:
+      S3_STAGING_BUCKET_NAME: !Ref TicketStagingBucket
+      PG_DATA_URL: ${env:PG_DATA_URL}
+      PG_SSL: "true"
+    role: LambdaExecutionRole
+    events:
+      - sqs:
+          arn: !GetAtt TicketsQueue.Arn
+          batchSize: 10
+
+  processTickets_error:
+    handler: src/handlers/processTickets_error.handler
+    description: "Viene chiamata da POST /processTickets_error -> inserisce i ticket nella coda DLQ in caso di fallimento della chiamata POST /tickets"
+    timeout: 3
+    environment:
+      DLQ_QUEUE_URL: !Ref TicketsDLQ
+      SUPPLIER_TOKEN_1_NLG: ${env:SUPPLIER_TOKEN_1_NLG}
+      SUPPLIER_TOKEN_2_ALIDAUNIA: ${env:SUPPLIER_TOKEN_2_ALIDAUNIA}
+      SUPPLIER_TOKEN_3_NAVITREMITI: ${env:SUPPLIER_TOKEN_3_NAVITREMITI}
+      SUPPLIER_TOKEN_4_GSTRAVEL: ${env:SUPPLIER_TOKEN_4_GSTRAVEL}
+      SUPPLIER_TOKEN_5_UTENTE_PRIVATO: ${env:SUPPLIER_TOKEN_5_UTENTE_PRIVATO}
+    role: LambdaExecutionRole
+    events:
+      - http:
+          path: processTickets_error
+          method: post
+
+  checkQueue:
+    handler: src/handlers/checkQueue.handler
+    description: "Viene chiamata da POST /checkQueue -> controlla lo stato della coda principale"
+    timeout: 10
+    environment:
+      MAIN_QUEUE_URL: !Ref TicketsQueue
+    role: LambdaExecutionRole
+    events:
+      - http:
+          path: checkQueue
+          method: post
+
+  checkDLQ:
+    handler: src/handlers/checkDLQ.handler
+    description: "Chiamata da POST /checkDLQ -> ottiene le informazioni dei ticket presenti in coda DLQ"
+    timeout: 10
+    environment:
+      DLQ_URL: !Ref TicketsDLQ
+    role: LambdaExecutionRole
+    events:
+      - http:
+          path: checkDLQ
+          method: post
+
+  replayDLQ:
+    handler: src/handlers/replayDLQ.handler
+    description: "Viene chiamata da POST /relayDLQ -> prova a rimandare i ticket nella coda principale così da poter essere riprocessati"
+    timeout: 10
+    environment:
+      DLQ_URL: !Ref TicketsDLQ
+      MAIN_QUEUE_URL: !Ref TicketsQueue
+    role: LambdaExecutionRole
+    events:
+      - http:
+          path: replayDLQ
+          method: post
+
+  validateTicket:
+    handler: src/handlers/validateTicket.handler
+    description: "Validazione ticket"
+    timeout: 3
+    environment:
+      PG_DATA_URL: ${env:PG_DATA_URL}
+      PG_SSL: "true"
+    role: WriteDynamo
+
+  getTicketByNumber:
+    handler: src/handlers/getTicketByNumber.handler
+    description: "Chiamato dall'app dall'utente controllore"
+    timeout: 3
+    role: ReadDynamoData
+    events:
+      - http:
+          path: ticket/{number}
+          method: get
+          authorizer:
+            name: UserTokenAuthorizer
+            type: request
+            identitySource: method.request.header.Authorization
+
+  # Lambda Authorizers
+  LambdaAuthorizer:
+    handler: src/authorizers/LambdaAuthorizer.handler
+    description: "Serve a controllare che la chiamata /tickets abbia il giusto header authorization"
+    timeout: 3
+    environment:
+      SUPPLIER_TOKEN_1_NLG: ${env:SUPPLIER_TOKEN_1_NLG}
+      SUPPLIER_TOKEN_2_ALIDAUNIA: ${env:SUPPLIER_TOKEN_2_ALIDAUNIA}
+      SUPPLIER_TOKEN_3_NAVITREMITI: ${env:SUPPLIER_TOKEN_3_NAVITREMITI}
+      SUPPLIER_TOKEN_4_GSTRAVEL: ${env:SUPPLIER_TOKEN_4_GSTRAVEL}
+      SUPPLIER_TOKEN_5_UTENTE_PRIVATO: ${env:SUPPLIER_TOKEN_5_UTENTE_PRIVATO}
+    role: arn:aws:iam::074993326091:role/service-role/LambdaAuthorizer-role-1anu4ndy
+
+  TokenAuthorizer:
+    handler: src/authorizers/TokenAuthorizer.handler
+    description: "Per i ruoli ADMIN e CHECKER: Serve ad autorizzare le chiamate provenienti dalla dashboard controllando il token di Firebase"
+    timeout: 30
+    environment:
+      FIREBASE_SERVICE_ACCOUNT_CREDENTIALS: ${env:FIREBASE_SERVICE_ACCOUNT_CREDENTIALS}
+    role: arn:aws:iam::074993326091:role/service-role/TokenAuthorizer-role-0mqsw9jn
+
+  UserTokenAuthorizer:
+    handler: src/authorizers/UserTokenAuthorizer.handler
+    description: "Per il ruolo CHECKER: Serve ad autorizzare le chiamate provenienti dall'app mobile controllando il token di Firebase"
+    timeout: 30
+    environment:
+      FIREBASE_SERVICE_ACCOUNT_CREDENTIALS: ${env:FIREBASE_SERVICE_ACCOUNT_CREDENTIALS}
+    role: arn:aws:iam::074993326091:role/service-role/UserTokenAuthorizer-role-84n1i7r3
+
+  # TremitiBot Lambda
+  tremiti-bot-lambda:
+    handler: src/bot/tremiti-bot-lambda.handler
+    description: "Lambda function per TremitiBot Bedrock"
+    timeout: 30
+    memorySize: 512
+    environment:
+      BEDROCK_TEMPERATURE: ${env:BEDROCK_TEMPERATURE, "0.3"}
+      PG_DATA_URL: ${env:PG_DATA_URL}
+      BEDROCK_MAX_TOKENS: ${env:BEDROCK_MAX_TOKENS, "2000"}
+      BEDROCK_MODEL_ID: ${env:BEDROCK_MODEL_ID, "anthropic.claude-3-haiku-20240307-v1:0"}
+      AWS_REGION: ${self:provider.region}
+    role: arn:aws:iam::074993326091:role/tremiti-bot-lambda-TremitiBotFunctionRole-Tvzs8wbaVHCl
+    events:
+      - http:
+          path: chat
+          method: post
+          cors: true
+      - http:
+          path: health
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    # SQS Queues
+    TicketsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: tickets-queue
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt TicketsDLQ.Arn
+          maxReceiveCount: 3
+
+    TicketsDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: tickets-dlq
+
+    # S3 Buckets
+    TicketStagingBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: tremitinow-ticket-staging
+        VersioningConfiguration:
+          Status: Enabled
+
+    # DynamoDB Table
+    TicketsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: tickets
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+
+    # IAM Roles (referencing existing ones)
+    LambdaExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: LambdaExecutionRole
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: SQSAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:GetQueueAttributes
+                  Resource:
+                    - !GetAtt TicketsQueue.Arn
+                    - !GetAtt TicketsDLQ.Arn
+          - PolicyName: S3Access
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                  Resource:
+                    - !Sub "${TicketStagingBucket}/*"
+          - PolicyName: DynamoDBAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                    - dynamodb:DeleteItem
+                    - dynamodb:Query
+                    - dynamodb:Scan
+                  Resource:
+                    - !GetAtt TicketsTable.Arn
+
+    ReadDynamoData:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ReadDynamoData
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: DynamoDBReadAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:Query
+                    - dynamodb:Scan
+                  Resource:
+                    - !GetAtt TicketsTable.Arn
+
+    WriteDynamo:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: WriteDynamo
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: DynamoDBWriteAccess
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                    - dynamodb:UpdateItem
+                    - dynamodb:DeleteItem
+                  Resource:
+                    - !GetAtt TicketsTable.Arn
+
+  Outputs:
+    ApiGatewayRestApiId:
+      Value: !Ref ApiGatewayRestApi
+      Export:
+        Name: ${self:service}-${self:provider.stage}-api-id
+
+    ApiGatewayUrl:
+      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${self:provider.region}.amazonaws.com/${self:provider.stage}"
+      Export:
+        Name: ${self:service}-${self:provider.stage}-api-url
+
+    TicketsQueueUrl:
+      Value: !Ref TicketsQueue
+      Export:
+        Name: ${self:service}-${self:provider.stage}-tickets-queue-url
+
+    TicketsDLQUrl:
+      Value: !Ref TicketsDLQ
+      Export:
+        Name: ${self:service}-${self:provider.stage}-tickets-dlq-url
+
+    TicketStagingBucketName:
+      Value: !Ref TicketStagingBucket
+      Export:
+        Name: ${self:service}-${self:provider.stage}-staging-bucket
