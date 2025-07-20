@@ -1,0 +1,10 @@
+{
+  "name": "tremitinow-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "knex": "^3.0.0",
+    "pg": "^8.0.0"
+  }
+}

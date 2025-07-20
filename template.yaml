@@ -1,0 +1,410 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: TremitiNow AWS - Sistema Unificato
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: nodejs22.x
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [prod]
+  FirebaseServiceAccountCredentials:
+    Type: String
+    Description: Firebase service account credentials JSON
+    NoEcho: true
+
+Resources:
+  # SQS Queues
+  TremitiNowTicketsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'tremitinow-${Stage}-tickets-main'
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TremitiNowTicketsDLQ.Arn
+        maxReceiveCount: 3
+
+  TremitiNowTicketsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'tremitinow-${Stage}-tickets-dlq'
+  
+  # DLQ per fallimenti di input/API stress
+  TremitiNowTicketsInputDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'tremitinow-${Stage}-tickets-input-dlq'
+
+  # S3 Bucket
+  TremitiNowTicketsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'tremitinow-${Stage}-tickets-storage'
+      VersioningConfiguration:
+        Status: Enabled
+
+  # DynamoDB Table
+  TremitiNowTicketsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'tremitinow-${Stage}-tickets'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: number
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TicketNumberIndex
+          KeySchema:
+            - AttributeName: number
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # API Gateway per Sistema Esterno (Tickets Submission)
+  TremitiNowExternalAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'tremitinow-${Stage}-external-api'
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  # API Gateway per Dashboard React (Admin)
+  TremitiNowAdminAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'tremitinow-${Stage}-admin-api'
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        Authorizers:
+          AdminAuthorizer:
+            FunctionArn: !GetAtt AdminAuthorizerFunction.Arn
+            Identity:
+              Header: authorization
+
+  # API Gateway per App Mobile (Controllori)
+  TremitiNowMobileAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'tremitinow-${Stage}-mobile-api'
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        Authorizers:
+          MobileAuthorizer:
+            FunctionArn: !GetAtt MobileAuthorizerFunction.Arn
+            Identity:
+              Header: authorization
+
+  # API Gateway per BOT AI
+  TremitiNowBotAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'tremitinow-${Stage}-bot-api'
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  # Lambda Functions
+  SubmitTicketsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-tickets-submit'
+      CodeUri: src/handlers/
+      Handler: submitTickets.handler
+      Description: "API endpoint per sottomissione tickets"
+      Environment:
+        Variables:
+          MAIN_QUEUE_URL: !Ref TremitiNowTicketsQueue
+          INPUT_DLQ_URL: !Ref TremitiNowTicketsInputDLQ
+          SUPPLIER_TOKEN_1_NLG: 'cicKKKunsdaCelPx359MH7R7Zo1frUjtKO4G8xl5'
+          SUPPLIER_TOKEN_2_ALIDAUNIA: 'zopLLLmnbxQeRkWv842FT9K2Yp7sxHduN3RvjiA1'
+          SUPPLIER_TOKEN_3_NAVITREMITI: 'migPPPaazZtLvDyM510CR3X8Wo9bgLqfV7ExnZt4'
+          SUPPLIER_TOKEN_4_GSTRAVEL: 'texQQQyywuBsNpMa266VH6L1Jq2ctKpoE5MdgyC7'
+          SUPPLIER_TOKEN_5_UTENTE_PRIVATO: 'rifMMMcckdUzQbHt903BN5D6Xs8ayTemK2KlhwR2'
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TremitiNowTicketsQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TremitiNowTicketsInputDLQ.QueueName
+      Events:
+        SubmitTicket:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowExternalAPI
+            Path: /tickets/submit
+            Method: post
+
+  ProcessTicketsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-tickets-processor'
+      CodeUri: src/handlers/
+      Handler: processTickets_s3.handler
+      Description: "Processore SQS per salvare tickets su PostgreSQL, DynamoDB e S3"
+      Environment:
+        Variables:
+          TICKETS_TABLE_NAME: !Ref TremitiNowTicketsTable
+          S3_STAGING_BUCKET_NAME: !Ref TremitiNowTicketsBucket
+          PG_DATA_URL: 'postgres://tremitinow:xQ9%25k-qPQ2W%3EwqD%24wj0y@51.158.130.161:1551/tremitinow'
+          PG_SSL: 'true'
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref TremitiNowTicketsBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref TremitiNowTicketsTable
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TremitiNowTicketsQueue.Arn
+            BatchSize: 10
+
+  MonitorQueueFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-queue-monitor'
+      CodeUri: src/handlers/
+      Handler: checkQueue.handler
+      Description: "Monitoraggio stato coda principale"
+      Environment:
+        Variables:
+          MAIN_QUEUE_URL: !Ref TremitiNowTicketsQueue
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TremitiNowTicketsQueue.QueueName
+      Events:
+        MonitorQueueApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowAdminAPI
+            Path: /admin/queue/status
+            Method: get
+
+  MonitorDLQFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-dlq-monitor'
+      CodeUri: src/handlers/
+      Handler: checkDLQ.handler
+      Description: "Monitoraggio Dead Letter Queue"
+      Environment:
+        Variables:
+          DLQ_URL: !Ref TremitiNowTicketsDLQ
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TremitiNowTicketsDLQ.QueueName
+      Events:
+        MonitorDLQApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowAdminAPI
+            Path: /admin/dlq/status
+            Method: get
+
+  ReprocessDLQFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-dlq-reprocess'
+      CodeUri: src/handlers/
+      Handler: replayDLQ.handler
+      Description: "Riprocessamento messaggi da DLQ verso coda principale"
+      Environment:
+        Variables:
+          DLQ_URL: !Ref TremitiNowTicketsDLQ
+          MAIN_QUEUE_URL: !Ref TremitiNowTicketsQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TremitiNowTicketsQueue.QueueName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TremitiNowTicketsDLQ.QueueName
+      Events:
+        ReprocessDLQApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowAdminAPI
+            Path: /admin/dlq/reprocess
+            Method: post
+            Auth:
+              Authorizer: AdminAuthorizer
+
+  # Lambda per riprocessare DLQ di input (stress API)
+  ReprocessInputDLQFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-input-dlq-reprocess'
+      CodeUri: src/handlers/
+      Handler: reprocessInputDLQ.handler
+      Description: "Riprocessamento messaggi da Input DLQ verso main queue"
+      Environment:
+        Variables:
+          INPUT_DLQ_URL: !Ref TremitiNowTicketsInputDLQ
+          MAIN_QUEUE_URL: !Ref TremitiNowTicketsQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TremitiNowTicketsQueue.QueueName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TremitiNowTicketsInputDLQ.QueueName
+      Events:
+        ReprocessInputDLQApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowAdminAPI
+            Path: /admin/input-dlq/reprocess
+            Method: post
+            Auth:
+              Authorizer: AdminAuthorizer
+
+  TicketLookupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-ticket-lookup'
+      CodeUri: src/handlers/
+      Handler: getTicketByNumber.handler
+      Description: "Ricerca ticket per numero tramite app mobile"
+      Environment:
+        Variables:
+          TICKETS_TABLE_NAME: !Ref TremitiNowTicketsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TremitiNowTicketsTable
+      Events:
+        TicketLookupApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowMobileAPI
+            Path: /mobile/ticket/lookup
+            Method: post
+            Auth:
+              Authorizer: MobileAuthorizer
+
+  TicketValidationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-ticket-validate'
+      CodeUri: src/handlers/
+      Handler: validateTicket.handler
+      Description: "Validazione ticket tramite app mobile"
+      Environment:
+        Variables:
+          TICKETS_TABLE_NAME: !Ref TremitiNowTicketsTable
+          PG_DATA_URL: 'postgres://tremitinow:xQ9%25k-qPQ2W%3EwqD%24wj0y@51.158.130.161:1551/tremitinow'
+          PG_SSL: 'true'
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref TremitiNowTicketsTable
+      Events:
+        TicketValidationApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowMobileAPI
+            Path: /mobile/ticket/validate
+            Method: post
+            Auth:
+              Authorizer: MobileAuthorizer
+
+  # Authorizers
+  AdminAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-auth-admin'
+      CodeUri: src/authorizers/
+      Handler: TokenAuthorizer.handler
+      Description: "Authorizer Firebase per admin e operator"
+      Environment:
+        Variables:
+          FIREBASE_SERVICE_ACCOUNT_CREDENTIALS: !Ref FirebaseServiceAccountCredentials
+
+  MobileAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-auth-mobile'
+      CodeUri: src/authorizers/
+      Handler: UserTokenAuthorizer.handler
+      Description: "Authorizer Firebase per app mobile (checker)"
+      Environment:
+        Variables:
+          FIREBASE_SERVICE_ACCOUNT_CREDENTIALS: !Ref FirebaseServiceAccountCredentials
+
+  TremitiBotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tremitinow-${Stage}-ai-chatbot'
+      CodeUri: src/bot/
+      Handler: tremiti-bot-lambda.handler
+      Description: "TremitiBot AI assistant con AWS Bedrock Claude"
+      MemorySize: 512
+      Environment:
+        Variables:
+          BEDROCK_TEMPERATURE: '0.3'
+          BEDROCK_MAX_TOKENS: '2000'
+          BEDROCK_MODEL_ID: 'anthropic.claude-3-haiku-20240307-v1:0'
+          PG_DATA_URL: 'postgres://tremitinow:xQ9%25k-qPQ2W%3EwqD%24wj0y@51.158.130.161:1551/tremitinow'
+          PG_SSL: 'true'
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: '*'
+      Events:
+        ChatEndpoint:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowBotAPI
+            Path: /ai/chat
+            Method: post
+        HealthCheck:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TremitiNowBotAPI
+            Path: /health
+            Method: get
+
+Outputs:
+  ExternalApiUrl:
+    Description: 'TremitiNow External API endpoint URL (per sistemi esterni)'
+    Value: !Sub 'https://${TremitiNowExternalAPI}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+
+  AdminApiUrl:
+    Description: 'TremitiNow Admin API endpoint URL (per dashboard React)'
+    Value: !Sub 'https://${TremitiNowAdminAPI}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+
+  MobileApiUrl:
+    Description: 'TremitiNow Mobile API endpoint URL (per app mobile controllori)'
+    Value: !Sub 'https://${TremitiNowMobileAPI}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+
+  BotApiUrl:
+    Description: 'TremitiNow Bot API endpoint URL (per chatbot AI)'
+    Value: !Sub 'https://${TremitiNowBotAPI}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+
+  TicketsQueueUrl:
+    Description: 'SQS Queue URL for tickets processing'
+    Value: !Ref TremitiNowTicketsQueue
+
+  TicketsStorageBucketName:
+    Description: 'S3 Bucket for tickets storage'
+    Value: !Ref TremitiNowTicketsBucket
+
+  TicketsTableName:
+    Description: 'DynamoDB Table for tickets'
+    Value: !Ref TremitiNowTicketsTable
