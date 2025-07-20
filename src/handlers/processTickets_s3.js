@@ -74,7 +74,7 @@ export const handler = async (event) => {
         id: postgresId.toString(),
         supplier: ticketData.supplier,
         date: ticketData.date,
-        number: ticketData.number,
+        number: String(ticketData.number), // Ensure number is always a string
         created_at: ticketData.created_at || new Date().toISOString(),
         uuid: ticketUuid
       };
