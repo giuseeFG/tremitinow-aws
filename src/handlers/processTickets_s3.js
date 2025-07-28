@@ -61,8 +61,29 @@ export const handler = async (event) => {
           postgresId = insertedTicket.id;
           console.log(`✅ PostgreSQL - Ticket salvato con ID: ${postgresId}`);
         } catch (pgError) {
-          console.error('❌ Errore PostgreSQL:', pgError.message);
-          throw new Error(`PostgreSQL: ${pgError.message}`);
+          // Se è un duplicato, cerca l'ID esistente
+          if (pgError.message.includes('duplicate key value violates unique constraint')) {
+            console.log('⚠️ PostgreSQL - Ticket duplicato, cercando ID esistente...');
+            try {
+              const existingTicket = await db('tickets')
+                .select('id')
+                .where({ number: ticketData.number, date: ticketData.date })
+                .first();
+              
+              if (existingTicket) {
+                postgresId = existingTicket.id;
+                console.log(`✅ PostgreSQL - ID esistente trovato: ${postgresId}`);
+              } else {
+                throw new Error('Ticket duplicato ma non trovato in database');
+              }
+            } catch (selectError) {
+              console.error('❌ Errore ricerca ticket esistente:', selectError.message);
+              throw new Error(`PostgreSQL: ${selectError.message}`);
+            }
+          } else {
+            console.error('❌ Errore PostgreSQL:', pgError.message);
+            throw new Error(`PostgreSQL: ${pgError.message}`);
+          }
         }
       } else {
         console.log('⚠️ PostgreSQL non disponibile');
@@ -90,8 +111,16 @@ export const handler = async (event) => {
         ConditionExpression: 'attribute_not_exists(id)' // Previene duplicati
       });
 
-      await dynamodb.send(putCommand);
-      console.log(`✅ DynamoDB - Ticket salvato con ID: ${postgresId}`);
+      try {
+        await dynamodb.send(putCommand);
+        console.log(`✅ DynamoDB - Ticket salvato con ID: ${postgresId}`);
+      } catch (dynamoError) {
+        if (dynamoError.name === 'ConditionalCheckFailedException') {
+          console.log(`⚠️ DynamoDB - Ticket con ID ${postgresId} già esistente, continuando...`);
+        } else {
+          throw dynamoError;
+        }
+      }
 
       // 3. Salva backup in S3
       const date = new Date(ticketData.date);

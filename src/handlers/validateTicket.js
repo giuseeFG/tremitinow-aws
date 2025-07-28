@@ -54,6 +54,9 @@ export const handler = async (event) => {
         })
       };
     }
+    
+    // Ensure ticketId is a string
+    const ticketIdStr = String(ticketId);
 
     const tableName = process.env.TICKETS_TABLE_NAME || 'tremitinow-prod-tickets';
     const now = new Date().toISOString();
@@ -62,7 +65,7 @@ export const handler = async (event) => {
     const dynamoCommand = new UpdateItemCommand({
       TableName: tableName,
       Key: {
-        id: { S: ticketId.toString() }
+        id: { S: ticketIdStr }
       },
       UpdateExpression: 'SET checked_at = :checked_at, controller = :controller',
       ExpressionAttributeValues: {
@@ -73,20 +76,19 @@ export const handler = async (event) => {
     });
 
     await dynamodb.send(dynamoCommand);
-    console.log(`✅ DynamoDB aggiornato per ticket ${ticketId}`);
+    console.log(`✅ DynamoDB aggiornato per ticket ${ticketIdStr}`);
 
     // Aggiorna PostgreSQL se disponibile
     const db = getDatabase();
     if (db) {
       try {
         await db('tickets')
-          .where('id', ticketId)
+          .where('id', ticketIdStr)
           .update({
             checked_at: now,
-            controller: controller,
-            updated_at: now
+            controller: controller
           });
-        console.log(`✅ PostgreSQL aggiornato per ticket ${ticketId}`);
+        console.log(`✅ PostgreSQL aggiornato per ticket ${ticketIdStr}`);
       } catch (pgError) {
         console.error('⚠️ Errore aggiornamento PostgreSQL:', pgError.message);
         // Non fallire se PostgreSQL non è disponibile
@@ -99,7 +101,7 @@ export const handler = async (event) => {
       body: JSON.stringify({
         success: true,
         message: 'Biglietto validato con successo',
-        ticketId,
+        ticketId: ticketIdStr,
         controller,
         validated_at: now,
         timestamp: new Date().toISOString()
