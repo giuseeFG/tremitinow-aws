@@ -1,0 +1,21 @@
+{
+  "name": "process-bundle",
+  "version": "1.0.0",
+  "description": "",
+  "main": "processTickets_s3.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.848.0",
+    "@aws-sdk/client-s3": "^3.850.0",
+    "@aws-sdk/util-dynamodb": "^3.848.0",
+    "knex": "^3.1.0",
+    "pg": "^8.16.3",
+    "uuid": "^11.1.0"
+  }
+}

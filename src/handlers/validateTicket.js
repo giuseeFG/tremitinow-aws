@@ -76,7 +76,7 @@ export const handler = async (event) => {
     });
 
     await dynamodb.send(dynamoCommand);
-    console.log(`✅ DynamoDB aggiornato per ticket ${ticketIdStr}`);
+    console.log(`✅ DynamoDB aggiornato per ticket ${ticketIdStr}`);  
 
     // Aggiorna PostgreSQL se disponibile
     const db = getDatabase();
