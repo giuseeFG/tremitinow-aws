@@ -13,7 +13,7 @@ function getDatabase() {
       console.log('⚠️ PG_DATA_URL non configurata, salvataggio DB disabilitato');
       return null;
     }
-    
+
     dbInstance = knex({
       client: 'pg',
       connection: {
@@ -147,6 +147,37 @@ Rispondi solo con il nome della categoria.`;
     return messages;
   }
 
+  async getEventsFromDatabase() {
+    try {
+      // Se il database non è configurato, restituisci array vuoto
+      if (!this.db) {
+        console.log('⚠️ Database non configurato per recupero eventi');
+        return [];
+      }
+
+      // Data corrente per filtrare solo eventi futuri
+      const today = new Date();
+      today.setHours(0, 0, 0, 0); // Imposta a mezzanotte per includere eventi di oggi
+
+      // Query per recuperare solo gli eventi futuri del gruppo 3 (Pro Loco)
+      const events = await this.db('posts')
+        .where('group', 3)
+        .where('created_at', '>=', today.toISOString()) // Solo eventi futuri
+        .orderBy('created_at', 'asc') // Ordinati dal più vicino
+        .limit(10) // Limita a 10 eventi futuri
+        .timeout(10000); // Timeout di 10 secondi
+
+      console.log(`🔍 Query eventi futuri - Trovati ${events.length} eventi futuri dalla Pro Loco`);
+      console.log('📋 Eventi futuri ordinati dal più vicino:', JSON.stringify(events, null, 2));
+
+      return events;
+    } catch (error) {
+      console.error('❌ Errore recupero eventi dal DB:', error.message);
+      console.error('❌ Stack trace:', error.stack);
+      return []; // Restituisci array vuoto in caso di errore
+    }
+  }
+
   async getRelevantData(category) {
     if (!category) return null;
 
@@ -220,23 +251,82 @@ IMPORTANTE: La data attuale è ${today}.
 
 ---
 
-### 📆 2. Orari traghetti
+### 📆 2. LETTURA ORARI TRAGHETTI - ISTRUZIONI CRITICHE
 
-Se l'utente chiede orari per una certa data, DEVI:
+**🔴 REGOLE FONDAMENTALI PER EVITARE ERRORI:**
+
+1. **VERIFICA SEMPRE LA DATA**: Prima di leggere qualsiasi orario, verifica che la data richiesta corrisponda ESATTAMENTE alla data nel JSON
+2. **IGNORA DATE PASSATE**: Non considerare mai orari, periodi o informazioni con date precedenti alla data odierna (${today}). Se un periodo è già terminato o una data è nel passato, ignorala completamente
+3. **CONTROLLA IL FORMATO DATA**: Le date nei JSON possono essere in formato "YYYY-MM-DD", "DD/MM/YYYY" o "DD-MM-YYYY" - normalizza sempre prima del confronto
+3. **VERIFICA LA DIREZIONE**: Controlla attentamente i campi "direction" nel JSON per assicurarti che corrisponda a origine e destinazione richieste
+4. **LEGGI TUTTI I CAMPI ORARIO**: 
+   - Per JET: cerca departure_time dentro l'array schedules
+   - Per NAVE: cerca departure_time dentro l'array schedules
+   - Per altre compagnie: cerca "departure_time", "time", "ora_partenza", "orario", "partenza"
+5. **CONTROLLA GIORNI DELLA SETTIMANA**:
+   - Per JET: campo days può essere "All" o stringa come "Saturday, Sunday" o "Monday to Saturday"
+   - Per NAVE: campo days è un array come ["Friday","Saturday"] o ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+6. **CONTROLLA PERIODO VALIDITÀ**:
+   - Per JET: oggetto period con from e to in formato "YYYY-MM-DD"
+   - Per NAVE: stringa period in formato "YYYY-MM-DD - YYYY-MM-DD"
+   - **IMPORTANTE**: Ignora completamente qualsiasi periodo che sia già terminato (data "to" precedente a oggi)
+7. **DOPPIO CONTROLLO**: Verifica sempre due volte la corrispondenza data/orario prima di rispondere
+
+**📋 PROCESSO DI LETTURA STRUTTURATO:**
+
+**PASSO 1** - Identificare data richiesta dall'utente e convertirla in formato standard (YYYY-MM-DD). Se la data richiesta è nel passato, informare l'utente che non ci sono più corse disponibili per quella data.
+**PASSO 2** - Per ogni compagnia, seguire questa logica precisa:
+   
+   **PER JET NLG:**
+   - Controllare l'array schedules
+   - Per ogni schedule, verificare che il period.to sia uguale o successivo alla data odierna (ignora periodi scaduti)
+   - Verificare se la data richiesta rientra nel period.from e period.to
+   - Controllare che direction corrisponda alla richiesta
+   - Verificare che il giorno della settimana sia incluso in days (es: "All", "Monday", "Saturday, Sunday")
+   - Estrarre departure_time
+   
+   **PER NAVE Santa Lucia:**
+   - Controllare l'array schedules
+   - Per ogni schedule, verificare che la data di fine del period non sia nel passato (ignora periodi scaduti)
+   - Verificare se il period (formato "YYYY-MM-DD - YYYY-MM-DD") include la data richiesta
+   - Controllare che direction corrisponda alla richiesta
+   - Verificare che il giorno della settimana sia nell'array days (es: ["Monday","Tuesday","Wednesday"])
+   - Estrarre departure_time
+   
+   **PER ALTRE COMPAGNIE:**
+   - Adattare la logica in base alla struttura del JSON specifico
+   - Sempre verificare periodo, direzione, giorni e orario
+
+**PASSO 3** - Validazione finale: ricontrollare che data, orari e direzione siano corretti
+
+**⚠️ CONTROLLI DI SICUREZZA SPECIFICI:**
+- **CONTROLLO PERIODO**: Verifica sempre che la data richiesta sia compresa tra from e to del periodo E che il periodo non sia scaduto (data di fine non nel passato)
+- **CONTROLLO GIORNI**: Per JET controlla se il giorno è in "All" o nella lista specifica (es: "Saturday, Sunday")
+- **CONTROLLO GIORNI NAVE**: Per NAVE controlla che il giorno sia nell'array days
+- **DIREZIONE**: Confronta sempre il campo direction con origine/destinazione richiesta
+- **DATE PASSATE**: Ignora automaticamente tutti i periodi, schedule o informazioni con date di fine precedenti a oggi (${today})
+- **ERRORE = STOP**: Se hai dubbi sulla correttezza, è meglio dire "non sono sicuro" piuttosto che dare info sbagliate
+
+**📤 FORMATO RISPOSTA ESEMPIO:**
+
+**Termoli → Isole Tremiti - 15/06/2025 (Sabato)**
+
+• **JET NLG**: 08:40, 11:10 
+• **NAVE Santa Lucia**: 08:00, 09:00, 15:45
+
+📎 **Link prenotazione**: 
+- JET/NAVE NLG: <a href="https://tremitinow.it/cGFnZS8xMA==">Clicca qui per prenotare</a>
+
+Se l'utente chiede orari per una certa data, DEVI seguire il processo strutturato sopra e poi:
 
 1. **Calcola la data corretta** se l'utente dice "domani", "dopodomani", "lunedì", ecc.
-2. Cercare **tutte** le tratte disponibili per quella data e direzione:
-   - JET NLG
-   - NAVE NLG
-   - Navitremiti (Gargano)
-   - Zenit (GS Travel)
-   - Elicottero (Foggia)
+2. Cercare **tutte** le tratte disponibili per quella data e direzione seguendo il processo strutturato sopra
 3. Mostrare tutte le opzioni disponibili in una **singola risposta** in formato Markdown con elenco puntato.
 4. Se una tratta è **fuori stagione** o non disponibile, dillo chiaramente.
 5. Se **nessuna corsa** è disponibile, scrivi:
    > "In data [DATA], non ci sono corse disponibili da [ORIGINE] a [DESTINAZIONE]."
 6. Non limitarti alla prima compagnia trovata: esamina tutti i JSON disponibili.
-7. Se l'utente ti chiede info sul collegamento tra Termoli e Tremiti o viceversa con partenza entro il 2 giugno 2025, sappi che ci sono corse aggiuntive extra non cataogate nel DB.
+7. Se l'utente ti chiede info sul collegamento tra Termoli e Tremiti o viceversa con partenza entro il 2 giugno 2025, sappi che ci sono corse aggiuntive extra non catalogate nel DB.
 Devi suggerire all'utente di controllare manualmente la pagina interna all'app di NLG cliccando qui: "https://tremitinow.it/cGFnZS8xMA==" 
 
 📎 Link prenotazione (da usare in base alla compagnia):
@@ -322,7 +412,7 @@ Ecco i dati che puoi usare:`;
 
 > Esiste anche una mappa dell'arcipelago interattiva. Basta andare nel menu principale dell'app e cliccare su "Mappa": la mappa comprende anche i percorsi e sentieri da fare a piedi e i tragitti per raggiungere le cale e le spiagge.
 > Se ti chiedono percorsi per visitare le isole (San Domino e San Nicola), rispondi che esiste la mappa sull'app che comprende anche i percorsi e sentieri da fare a piedi e i tragitti per raggiungere le cale e le spiagge.
-> Se ti chiedono dove si trovano alcune cale, fai riferimento al JSON delle cale e rispondi con la cala che più assomiglia alla richiesta: suggerisci anche il "clicca qui" per andare alla pagina di dettalgio dela cala.
+> Se ti chiedono dove si trovano alcune cale, fai riferimento al JSON delle cale e rispondi con la cala che più assomiglia alla richiesta: suggerisci anche il "clicca qui" per andare alla pagina di dettaglio dela cala.
 > Se ti chiedono gli orari della Conad o del supermercato vai alla pagina "conad".
 > Se ti chiedono info sulle spiagge? Cala delle arene o cala matano (aggiungi i link alle cale).
 > Se ti chiedono dov'è la biblioteca, rispondi che sta a San Domino prima della discesa in Via Federico II.
@@ -361,42 +451,11 @@ ${JSON.stringify(this.jsonData.pagine)}
 
 > Esiste anche una mappa dell'arcipelago interattiva. Basta andare nel menu principale dell'app e cliccare su "Mappa": la mappa comprende anche i percorsi e sentieri da fare a piedi e i tragitti per raggiungere le cale e le spiagge.
 > Se ti chiedono percorsi per visitare le isole (San Domino e San Nicola), rispondi che esiste la mappa sull'app che comprende anche i percorsi e sentieri da fare a piedi e i tragitti per raggiungere le cale e le spiagge.
-> Se ti chiedono dove si trovano alcune cale, fai riferimento al JSON delle cale e rispondi con la cala che più assomiglia alla richiesta: suggerisci anche il "clicca qui" per andare alla pagina di dettalgio dela cala.
+> Se ti chiedono dove si trovano alcune cale, fai riferimento al JSON delle cale e rispondi con la cala che più assomiglia alla richiesta: suggerisci anche il "clicca qui" per andare alla pagina di dettaglio dela cala.
 > Se ti chiedono gli orari della Conad o del supermercato vai alla pagina "conad".
 > Se ti chiedono info sulle spiagge? Cala delle arene o cala matano (aggiungi i link alle cale).
 > Se ti chiedono dov'è la biblioteca, rispondi che sta a San Domino prima della discesa in Via Federico II.
 > Se ti chiedono qualcosa come Appartamenti in affitto oppure Casa vacanze fai riferimento al JSON_PAGINE cercando dove dormire.`;
-  }
-
-  async getEventsFromDatabase() {
-    try {
-      // Se il database non è configurato, restituisci array vuoto
-      if (!this.db) {
-        console.log('⚠️ Database non configurato per recupero eventi');
-        return [];
-      }
-      
-      // Data corrente per filtrare solo eventi futuri
-      const today = new Date();
-      today.setHours(0, 0, 0, 0); // Imposta a mezzanotte per includere eventi di oggi
-      
-      // Query per recuperare solo gli eventi futuri del gruppo 3 (Pro Loco)
-      const events = await this.db('posts')
-        .where('group', 3)
-        .where('created_at', '>=', today.toISOString()) // Solo eventi futuri
-        .orderBy('created_at', 'asc') // Ordinati dal più vicino
-        .limit(10) // Limita a 10 eventi futuri
-        .timeout(10000); // Timeout di 10 secondi
-
-      console.log(`🔍 Query eventi futuri - Trovati ${events.length} eventi futuri dalla Pro Loco`);
-      console.log('📋 Eventi futuri ordinati dal più vicino:', JSON.stringify(events, null, 2));
-      
-      return events;
-    } catch (error) {
-      console.error('❌ Errore recupero eventi dal DB:', error.message);
-      console.error('❌ Stack trace:', error.stack);
-      return []; // Restituisci array vuoto in caso di errore
-    }
   }
 
   async saveToDatabase(question, answer) {
@@ -406,7 +465,7 @@ ${JSON.stringify(this.jsonData.pagine)}
         console.log('⚠️ Database non configurato, salvataggio saltato');
         return;
       }
-      
+
       await this.db('bot_messages')
         .insert({
           question: question,
