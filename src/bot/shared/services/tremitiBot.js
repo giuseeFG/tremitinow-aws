@@ -521,6 +521,37 @@ ${JSON.stringify(this.jsonData.pagine)}
     }
   }
 
+  // Funzione per verificare se la risposta contiene orari JET validi
+  hasValidJetSchedules(response, userMessage) {
+    const responseText = response.toLowerCase();
+    const userMessageLower = userMessage.toLowerCase();
+    
+    // Verifica se l'utente sta chiedendo orari di traghetti
+    const isScheduleRequest = userMessageLower.includes('orari') || 
+                             userMessageLower.includes('traghetti') ||
+                             userMessageLower.includes('jet') ||
+                             userMessageLower.includes('partenza') ||
+                             userMessageLower.includes('arrivo') ||
+                             userMessageLower.includes('tremiti');
+    
+    if (!isScheduleRequest) return true; // Non è una richiesta di orari, va bene
+    
+    // Verifica se la risposta contiene riferimenti JET
+    const hasJetReference = responseText.includes('jet') || responseText.includes('nlg');
+    
+    // Verifica se la risposta contiene orari (formato HH:MM)
+    const timePattern = /\d{1,2}[:\.]\d{2}/g;
+    const hasTimeFormat = timePattern.test(responseText);
+    
+    // Se è una richiesta di orari ma non ha riferimenti JET o orari, è sospetta
+    if (isScheduleRequest && (!hasJetReference || !hasTimeFormat)) {
+      console.log('🚨 Risposta sospetta: mancano orari JET in una richiesta di orari');
+      return false;
+    }
+    
+    return true;
+  }
+
   async sendMessage(userMessage, conversationHistory = []) {
     try {
       // Determina la categoria della query
@@ -544,10 +575,64 @@ ${JSON.stringify(this.jsonData.pagine)}
 
       const response = await this.client.send(command);
       const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+      let finalResponse = responseBody.content[0].text;
+
+      // ⚡ DOPPIO CONTROLLO PER ORARI TRAGHETTI
+      if (category === 'traghetti') {
+        console.log('🔄 Attivato doppio controllo per orari traghetti');
+        
+        if (!this.hasValidJetSchedules(finalResponse, userMessage)) {
+          console.log('🚨 Prima risposta incompleta, riprocesso con enfasi su JET...');
+          
+          // Crea un prompt più specifico per forzare la lettura degli orari JET
+          const enhancedPayload = {
+            ...payload,
+            system: await this.buildRagPrompt(category) + `
+
+🚨 CONTROLLO QUALITÀ ATTIVATO: 
+Prima di rispondere, VERIFICA SEMPRE che la tua risposta includa:
+1. Gli orari JET NLG se esistono per la data/direzione richiesta
+2. Tutti gli orari disponibili per quella data specifica
+3. La direzione corretta (andata o ritorno)
+
+IMPORTANTE: Non limitarti alla prima compagnia trovata. Esamina TUTTI i JSON dei traghetti (JET, NAVE, GARGANO, ZENIT, ELICOTTERO) ma sempre con la direzione corretta.
+
+Se stai rispondendo a una richiesta di orari traghetti, la tua risposta DEVE contenere:
+- Almeno un orario in formato HH:MM
+- Il nome della compagnia (es. JET NLG, NAVE Santa Lucia)
+- La direzione corretta della tratta
+
+Se non trovi orari, devi dire chiaramente "Non ci sono corse disponibili per quella data/direzione".`,
+            messages: [
+              ...this.prepareMessages(userMessage, conversationHistory),
+              { 
+                role: 'assistant', 
+                content: 'Ho notato che la mia prima risposta potrebbe essere incompleta per gli orari traghetti. Lasciami ricontrollare tutti i dati disponibili...' 
+              },
+              { 
+                role: 'user', 
+                content: `Ricontrolla e fornisci una risposta completa per: "${userMessage}". Assicurati di includere TUTTI gli orari disponibili delle diverse compagnie per la data e direzione richieste.` 
+              }
+            ]
+          };
+
+          const doubleCheckCommand = new InvokeModelCommand({
+            modelId: this.modelConfig.modelId,
+            body: JSON.stringify(enhancedPayload),
+            contentType: 'application/json'
+          });
+
+          const doubleCheckResponse = await this.client.send(doubleCheckCommand);
+          const doubleCheckBody = JSON.parse(new TextDecoder().decode(doubleCheckResponse.body));
+          
+          finalResponse = doubleCheckBody.content[0].text;
+          console.log('✅ Doppio controllo completato, risposta aggiornata');
+        }
+      }
 
       // Salva nel DB SINCRONAMENTE (BLOCKING) - attendiamo che finisca prima di restituire la risposta
       try {
-        await this.saveToDatabase(userMessage, responseBody.content[0].text);
+        await this.saveToDatabase(userMessage, finalResponse);
       } catch (dbError) {
         console.error('❌ Errore salvataggio DB:', dbError.message);
         // Non bloccare la risposta anche se il DB fallisce
@@ -555,7 +640,7 @@ ${JSON.stringify(this.jsonData.pagine)}
 
       return {
         success: true,
-        message: responseBody.content[0].text,
+        message: finalResponse,
         usage: {
           inputTokens: responseBody.usage.input_tokens,
           outputTokens: responseBody.usage.output_tokens
