@@ -1,0 +1,16 @@
+{
+  "name": "ferryhopper-proxy",
+  "version": "1.0.0",
+  "description": "Lambda function to proxy FerryHopper API requests",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "lambda",
+    "ferryhopper",
+    "proxy"
+  ],
+  "author": "",
+  "license": "ISC"
+}
